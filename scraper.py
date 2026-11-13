@@ -8,67 +8,46 @@ from supabase import create_client
 supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
 ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-def scrape_mnre():
-    """Scrapes latest policies & orders from MNRE"""
-    url = "https://mnre.gov.in/documents/orders-and-notices"
+# Dictionary of State Electricity Regulatory Commissions (SERCs) & Central Portals
+PORTALS = {
+    "MNRE": "https://mnre.gov.in/",
+    "CERC": "https://cercind.gov.in/index-en.html",
+    "SECI": "https://www.seci.co.in/",
+    "MERC (Maharashtra)": "https://www.merc.gov.in/",
+    "GERC (Gujarat)": "https://gercin.org/",
+    "UPERC (Uttar Pradesh)": "https://www.uperc.org/",
+    "TNERC (Tamil Nadu)": "https://www.tnerc.gov.in/",
+    "RERC (Rajasthan)": "https://rerc.rajasthan.gov.in/"
+}
+
+def scrape_portal(source_name, base_url):
+    """Generic scraper function that handles any central or state regulatory portal"""
     policies = []
     try:
-        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # Adjust selectors based on exact site DOM structure
-            items = soup.find_all('a', class_='visibilityView') or soup.select('.card, tr')
-            for item in items[:5]: # Grabbing latest entries
-                title = item.get_text(strip=True)
-                link = item.get('href', url)
-                if title:
-                    policies.append({
-                        "title": title,
-                        "source": "MNRE",
-                        "url": link if link.startswith('http') else f"https://mnre.gov.in{link}",
-                        "content": f"MNRE Policy update: {title}"
-                    })
+            links = soup.find_all('a')
+            
+            for link_tag in links:
+                title = link_tag.get_text(strip=True)
+                href = link_tag.get('href', '')
+                
+                # Filter for high-relevance keywords in renewable energy/tariffs
+                if title and any(kw in title for kw in ["Solar", "Tariff", "Regulation", "Policy", "Order", "Tender", "Amendment", "Guidelines"]):
+                    if len(title) > 20: # Drop generic navigation items
+                        full_url = href if href.startswith('http') else base_url.rstrip('/') + '/' + href.lstrip('/')
+                        policies.append({
+                            "title": title,
+                            "source": source_name,
+                            "url": full_url,
+                            "content": f"[{source_name}] Regulatory Update: {title}"
+                        })
+        # Limit to latest 3 per portal to keep execution fast and clean
+        return policies[:3]
     except Exception as e:
-        print(f"Error scraping MNRE: {e}")
-    return policies
-
-def scrape_cerc():
-    """Scrapes latest regulations from CERC"""
-    url = "https://cercind.gov.in/index-en.html"
-    policies = []
-    try:
-        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # Extracting recent draft/final notifications
-            notices = soup.find_all('a')
-            for notice in notices:
-                text = notice.get_text(strip=True)
-                if "Regulations" in text or "Amendment" in text or "Tariff" in text:
-                    link = notice.get('href', '')
-                    policies.append({
-                        "title": text,
-                        "source": "CERC",
-                        "url": link if link.startswith('http') else f"https://cercind.gov.in/{link}",
-                        "content": f"CERC Regulatory update: {text}"
-                    })
-        # Limit to prevent overloading in a single run
-        policies = policies[:5]
-    except Exception as e:
-        print(f"Error scraping CERC: {e}")
-    return policies
-
-def scrape_seci():
-    """Scrapes latest tender notices from SECI"""
-    url = "https://www.seci.co.in/" # Main SECI portal
-    policies = []
-    try:
-        # Placeholder logic for SECI tenders/notices parsing
-        # Add targeted requests and BeautifulSoup parsing rules here
-        pass
-    except Exception as e:
-        print(f"Error scraping SECI: {e}")
-    return policies
+        print(f"Error scraping {source_name}: {e}")
+        return []
 
 def analyze_with_gemini(policy_text):
     """Passes raw policy text through Gemini for instant business impact analysis"""
@@ -85,15 +64,15 @@ def analyze_with_gemini(policy_text):
 def main():
     all_policies = []
     
-    print("🚀 Starting multi-portal regulatory scrape...")
+    print("🚀 Starting nationwide regulatory harvest across Central & State portals...")
     
-    print("Fetching MNRE policies...")
-    all_policies.extend(scrape_mnre())
+    # Loop through every configured central and state portal dynamically
+    for source_name, url in PORTALS.items():
+        print(f"Fetching from {source_name}...")
+        portal_data = scrape_portal(source_name, url)
+        all_policies.extend(portal_data)
     
-    print("Fetching CERC regulations...")
-    all_policies.extend(scrape_cerc())
-    
-    print(f"Total policies harvested: {len(all_policies)}")
+    print(f"Total policies harvested nationwide: {len(all_policies)}")
     
     # Process and upsert into Supabase securely
     for policy in all_policies:
@@ -107,7 +86,6 @@ def main():
             "ai_summary": ai_summary
         }
         
-        # Safe upsert using unique URL to prevent duplicate errors
         try:
             supabase.table("policies").upsert(payload, on_conflict="url").execute()
             print(f"Synced to DB: [{policy['source']}] {policy['title'][:40]}...")
