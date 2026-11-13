@@ -1,0 +1,6 @@
+{
+  "name": "Wolf Insights",
+  "description": "AI-powered Indian Renewable Energy & Climate Policy Intelligence Platform for executives, founders, and investors.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
