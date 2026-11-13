@@ -1,110 +1,118 @@
 import os
-import json
-import time
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
 from supabase import create_client
 
-requests.packages.urllib3.disable_warnings()
+# Initialize Supabase & Gemini clients
+supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+ai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# Initialize Gemini and Supabase from GitHub Secrets
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+def scrape_mnre():
+    """Scrapes latest policies & orders from MNRE"""
+    url = "https://mnre.gov.in/documents/orders-and-notices"
+    policies = []
+    try:
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Adjust selectors based on exact site DOM structure
+            items = soup.find_all('a', class_='visibilityView') or soup.select('.card, tr')
+            for item in items[:5]: # Grabbing latest entries
+                title = item.get_text(strip=True)
+                link = item.get('href', url)
+                if title:
+                    policies.append({
+                        "title": title,
+                        "source": "MNRE",
+                        "url": link if link.startswith('http') else f"https://mnre.gov.in{link}",
+                        "content": f"MNRE Policy update: {title}"
+                    })
+    except Exception as e:
+        print(f"Error scraping MNRE: {e}")
+    return policies
 
-class PersonaImpact(BaseModel):
-    investor_family_office: str
-    renewable_startup: str
-    biogas_operator: str
-    corporate_strategy: str
+def scrape_cerc():
+    """Scrapes latest regulations from CERC"""
+    url = "https://cercind.gov.in/index-en.html"
+    policies = []
+    try:
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # Extracting recent draft/final notifications
+            notices = soup.find_all('a')
+            for notice in notices:
+                text = notice.get_text(strip=True)
+                if "Regulations" in text or "Amendment" in text or "Tariff" in text:
+                    link = notice.get('href', '')
+                    policies.append({
+                        "title": text,
+                        "source": "CERC",
+                        "url": link if link.startswith('http') else f"https://cercind.gov.in/{link}",
+                        "content": f"CERC Regulatory update: {text}"
+                    })
+        # Limit to prevent overloading in a single run
+        policies = policies[:5]
+    except Exception as e:
+        print(f"Error scraping CERC: {e}")
+    return policies
 
-class AmendmentDiff(BaseModel):
-    is_amendment: bool
-    previous_rule: str
-    new_rule: str
+def scrape_seci():
+    """Scrapes latest tender notices from SECI"""
+    url = "https://www.seci.co.in/" # Main SECI portal
+    policies = []
+    try:
+        # Placeholder logic for SECI tenders/notices parsing
+        # Add targeted requests and BeautifulSoup parsing rules here
+        pass
+    except Exception as e:
+        print(f"Error scraping SECI: {e}")
+    return policies
 
-class PolicyIntelligence(BaseModel):
-    title: str
-    source: str
-    sector: str
-    policy_type: str
-    executive_summary: list[str]
-    relevance_score: int
-    persona_impacts: PersonaImpact
-    amendment_diff: AmendmentDiff
+def analyze_with_gemini(policy_text):
+    """Passes raw policy text through Gemini for instant business impact analysis"""
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Analyze this Indian renewable energy policy/regulation. Provide a 2-sentence executive summary and key business impact for startup founders and IPP developers: {policy_text}"
+        )
+        return response.text
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        return "AI analysis unavailable."
 
-def fetch_mnre_notices(limit=4):
-    url = "https://mnre.gov.in/en/notice-category/notifications/"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers, timeout=20, verify=False)
-    soup = BeautifulSoup(res.text, "html.parser")
-    notices = []
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        text = link.get_text(strip=True)
-        if text and len(text) > 20 and (".pdf" in href.lower() or "notice" in href.lower()):
-            full_url = urljoin(url, href)
-            if not any(n["url"] == full_url for n in notices):
-                notices.append({"title": text, "url": full_url, "source": "MNRE"})
-        if len(notices) >= limit:
-            break
-    return notices
-
-def already_exists(url):
-    res = supabase.table("policies").select("id").eq("source_url", url).execute()
-    return len(res.data) > 0
-
-def process_notice(notice):
-    if already_exists(notice["url"]):
-        print(f"Skipping existing: {notice['title'][:50]}")
-        return
-
-    prompt = f"""
-    Analyze this Indian renewable energy government notice for Wolf Insights:
-    Source: {notice['source']}
-    Title: {notice['title']}
-    URL: {notice['url']}
-    Provide a 3-bullet executive summary (under 15 words per bullet), sector, policy type, 
-    relevance score (1-100), amendment comparison, and specific business impacts for each persona.
-    """
-    contents = [prompt]
-    temp_pdf = None
-
-    if notice["url"].lower().endswith(".pdf"):
+def main():
+    all_policies = []
+    
+    print("🚀 Starting multi-portal regulatory scrape...")
+    
+    print("Fetching MNRE policies...")
+    all_policies.extend(scrape_mnre())
+    
+    print("Fetching CERC regulations...")
+    all_policies.extend(scrape_cerc())
+    
+    print(f"Total policies harvested: {len(all_policies)}")
+    
+    # Process and upsert into Supabase securely
+    for policy in all_policies:
+        ai_summary = analyze_with_gemini(policy['content'])
+        
+        payload = {
+            "title": policy['title'],
+            "source": policy['source'],
+            "url": policy['url'],
+            "raw_content": policy['content'],
+            "ai_summary": ai_summary
+        }
+        
+        # Safe upsert using unique URL to prevent duplicate errors
         try:
-            pdf_res = requests.get(notice["url"], timeout=25, verify=False)
-            temp_pdf = "temp.pdf"
-            with open(temp_pdf, "wb") as f:
-                f.write(pdf_res.content)
-            contents.append(client.files.upload(file=temp_pdf))
-        except Exception as e:
-            print(f"PDF download skipped: {e}")
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PolicyIntelligence,
-            temperature=0.2,
-        ),
-    )
-
-    if temp_pdf and os.path.exists(temp_pdf):
-        os.remove(temp_pdf)
-
-    data = json.loads(response.text)
-    data["source_url"] = notice["url"]
-    supabase.table("policies").insert(data).execute()
-    print(f"Inserted: {data['title'][:50]}")
+            supabase.table("policies").upsert(payload, on_conflict="url").execute()
+            print(f"Synced to DB: [{policy['source']}] {policy['title'][:40]}...")
+        except Exception as db_err:
+            print(f"Database upsert error: {db_err}")
 
 if __name__ == "__main__":
-    for item in fetch_mnre_notices(limit=4):
-        try:
-            process_notice(item)
-            time.sleep(2)
-        except Exception as e:
-            print(f"Error on {item['title'][:30]}: {e}")
+    main()
